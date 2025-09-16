@@ -700,7 +700,9 @@ def run_single(
         labels = []
         search_times = []
         path_lengths = []
+        shortcut_lengths = []
         expansions = []
+        gains = []
         for algo in algorithms:
             key = algo.lower()
             res = results.get(key)
@@ -709,17 +711,46 @@ def run_single(
             stats = res["stats"]
             labels.append(key.upper())
             search_times.append(stats.search_time)
-            path_lengths.append(stats.path_length if stats.path_length is not None else path_length(res["path"]))
+            raw_len = stats.path_length if stats.path_length is not None else path_length(res["path"])
+            path_lengths.append(raw_len)
+            shortcut = res.get("shortcut")
+            if shortcut and len(shortcut) >= 2:
+                sc_len = path_length(shortcut)
+                shortcut_lengths.append(sc_len)
+                gains.append(raw_len - sc_len)
+            else:
+                shortcut_lengths.append(float("nan"))
+                gains.append(float("nan"))
             expansions.append(stats.expanded_nodes or 0)
 
         if labels:
-            fig, axes = pl.subplots(1, 2, figsize=(10, 4))
-            axes[0].bar(labels, search_times, color=["#1b9e77", "#d95f02"][: len(labels)])
+            fig, axes = pl.subplots(1, 3, figsize=(14, 4))
+            colors = ["#1b9e77", "#d95f02", "#7570b3"]
+            axes[0].bar(labels, search_times, color=colors[: len(labels)])
             axes[0].set_title("Search Time (s)")
             axes[0].set_ylabel("seconds")
-            axes[1].bar(labels, expansions, color=["#7570b3", "#e7298a"][: len(labels)])
-            axes[1].set_title("Expanded Nodes")
-            axes[1].set_ylabel("count")
+
+            width = 0.35
+            x = np.arange(len(labels))
+            ax1 = axes[1]
+            ax1.bar(x - width / 2, path_lengths, width=width, color="#377eb8", label="raw")
+            ax1.bar(
+                x + width / 2,
+                [v if not math.isnan(v) else 0.0 for v in shortcut_lengths],
+                width=width,
+                color="#4daf4a",
+                label="shortcut",
+            )
+            ax1.set_xticks(x)
+            ax1.set_xticklabels(labels)
+            ax1.set_title("Path Length vs Shortcut")
+            ax1.set_ylabel("length")
+            ax1.legend()
+
+            axes[2].bar(labels, expansions, color=colors[: len(labels)])
+            axes[2].set_title("Expanded Nodes")
+            axes[2].set_ylabel("count")
+
             for ax in axes:
                 ax.set_ylim(bottom=0)
             fig.suptitle("Algorithm Comparison")
@@ -766,7 +797,16 @@ def benchmark(
     total_build = 0.0
     roadmap_nodes_total = 0
     metrics = {
-        algo.lower(): {"times": [], "lengths": [], "expanded": [], "success": 0}
+        algo.lower(): {
+            "times": [],
+            "lengths": [],
+            "shortcut_lengths": [],
+            "shortcut_times": [],
+            "expanded": [],
+            "gains_abs": [],
+            "gains_rel": [],
+            "success": 0,
+        }
         for algo in algorithms
     }
 
@@ -797,7 +837,31 @@ def benchmark(
                     continue
                 metrics[key]["success"] += 1
                 metrics[key]["times"].append(stats_query.search_time)
-                metrics[key]["lengths"].append(stats_query.path_length or path_length(path_xy))
+                raw_len = stats_query.path_length or path_length(path_xy)
+                metrics[key]["lengths"].append(raw_len)
+
+                sc_start = time.time()
+                shortcut = path_shortcutting(
+                    path_xy,
+                    env,
+                    maxrep=400,
+                    step=planner.collision_check_step,
+                    seed=env_idx * 10_000 + q_idx,
+                )
+                sc_duration = time.time() - sc_start
+                metrics[key]["shortcut_times"].append(sc_duration)
+                if shortcut and len(shortcut) >= 2:
+                    sc_len = path_length(shortcut)
+                    gain_abs = raw_len - sc_len
+                    gain_rel = gain_abs / raw_len if raw_len > 1e-9 else 0.0
+                    metrics[key]["shortcut_lengths"].append(sc_len)
+                    metrics[key]["gains_abs"].append(gain_abs)
+                    metrics[key]["gains_rel"].append(gain_rel)
+                else:
+                    metrics[key]["shortcut_lengths"].append(float('nan'))
+                    metrics[key]["gains_abs"].append(float('nan'))
+                    metrics[key]["gains_rel"].append(float('nan'))
+
                 if stats_query.expanded_nodes is not None:
                     metrics[key]["expanded"].append(stats_query.expanded_nodes)
 
@@ -809,7 +873,11 @@ def benchmark(
 
     labels: List[str] = []
     avg_times: List[float] = []
+    avg_lengths: List[float] = []
+    avg_shortcuts: List[float] = []
+    avg_shortcut_times: List[float] = []
     avg_expanded: List[float] = []
+    success_rates: List[float] = []
 
     for algo in algorithms:
         key = algo.lower()
@@ -819,30 +887,74 @@ def benchmark(
         if succ == 0:
             print(f"  {algo.upper()}: no successful paths")
             avg_times.append(0.0)
+            avg_lengths.append(float('nan'))
+            avg_shortcuts.append(float('nan'))
+            avg_shortcut_times.append(0.0)
             avg_expanded.append(0.0)
+            success_rates.append(0.0)
             continue
+
         avg_time = float(np.mean(data["times"]))
-        avg_len = float(np.mean(data["lengths"]))
+        avg_len = float(np.mean(data["lengths"])) if data["lengths"] else float('nan')
+        sc_vals = [v for v in data["shortcut_lengths"] if not math.isnan(v)]
+        avg_short_len = float(np.mean(sc_vals)) if sc_vals else float('nan')
+        avg_sc_time = float(np.mean(data["shortcut_times"])) if data["shortcut_times"] else 0.0
         avg_exp = float(np.mean(data["expanded"])) if data["expanded"] else 0.0
+        gains_rel = [g for g in data["gains_rel"] if not math.isnan(g)]
+        avg_gain_pct = float(np.mean(gains_rel) * 100.0) if gains_rel else float('nan')
+        best_gain = max(gains_rel) * 100.0 if gains_rel else float('nan')
+        worst_gain = min(gains_rel) * 100.0 if gains_rel else float('nan')
+
         avg_times.append(avg_time)
+        avg_lengths.append(avg_len)
+        avg_shortcuts.append(avg_short_len)
+        avg_shortcut_times.append(avg_sc_time)
         avg_expanded.append(avg_exp)
+        success_rates.append(succ / total_cases)
+
         print(
-            f"  {algo.upper():8s} -> success: {succ}/{total_cases}  avg_time: {avg_time:.4f}s  avg_length: {avg_len:.3f}  avg_expanded: {avg_exp:.1f}"
+            f"  {algo.upper():8s} -> success: {succ}/{total_cases}  avg_time: {avg_time:.4f}s  avg_length: {avg_len:.3f} "
+            f"avg_shortcut: {avg_short_len:.3f}  shortcut_time: {avg_sc_time:.4f}s  avg_expanded: {avg_exp:.1f}"
         )
+        if gains_rel:
+            print(
+                f"    shortcut gain avg: {avg_gain_pct:.2f}%  best: {best_gain:.2f}%  worst: {worst_gain:.2f}%"
+            )
 
     if show_hist and any(metrics[a.lower()]["success"] > 0 for a in algorithms):
-        fig, axes = pl.subplots(1, 2, figsize=(10, 4))
-        axes[0].bar(labels, avg_times, color=["#1b9e77", "#d95f02", "#7570b3", "#e7298a"][: len(labels)])
-        axes[0].set_title("Average Search Time")
-        axes[0].set_ylabel("seconds")
-        axes[0].set_ylim(bottom=0)
+        colors = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a"]
+        fig, axes = pl.subplots(2, 3, figsize=(14, 8))
+        axes = axes.flatten()
 
-        axes[1].bar(labels, avg_expanded, color=["#66a61e", "#e6ab02", "#a6761d", "#666666"][: len(labels)])
-        axes[1].set_title("Average Expanded Nodes")
-        axes[1].set_ylabel("count")
-        axes[1].set_ylim(bottom=0)
+        axes[0].bar(labels, avg_times, color=colors[: len(labels)])
+        axes[0].set_title("Avg Search Time")
+        axes[0].set_ylabel("seconds")
+
+        axes[1].bar(labels, avg_shortcut_times, color=colors[: len(labels)])
+        axes[1].set_title("Avg Shortcut Time")
+        axes[1].set_ylabel("seconds")
+
+        axes[2].bar(labels, avg_lengths, color=colors[: len(labels)])
+        axes[2].set_title("Avg Path Length")
+        axes[2].set_ylabel("length")
+
+        axes[3].bar(labels, avg_shortcuts, color=colors[: len(labels)])
+        axes[3].set_title("Avg Shortcut Length")
+        axes[3].set_ylabel("length")
+
+        axes[4].bar(labels, avg_expanded, color=colors[: len(labels)])
+        axes[4].set_title("Avg Expanded Nodes")
+        axes[4].set_ylabel("count")
+
+        axes[5].bar(labels, [rate * 100.0 for rate in success_rates], color=colors[: len(labels)])
+        axes[5].set_title("Success Rate")
+        axes[5].set_ylabel("percent")
+
+        for ax in axes:
+            ax.set_ylim(bottom=0)
+
         fig.suptitle("Algorithm Benchmark Comparison")
-        fig.tight_layout()
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
 
 
 
