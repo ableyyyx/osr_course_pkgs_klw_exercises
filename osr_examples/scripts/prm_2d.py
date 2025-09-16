@@ -483,6 +483,7 @@ def prm_plan(
             )
             if shortcut_path is not None and len(shortcut_path) >= 2:
                 msg += " shortcut=%.3f" % path_length(shortcut_path)
+                msg += " "
             print(msg)
 
     if visualize:
@@ -523,6 +524,7 @@ def _draw_roadmap(planner: ProbabilisticRoadmap2D) -> None:
 
 
 def run_single(seed: int = 4, n_samples: int = 600, radius: float = 0.6) -> Optional[List[Point]]:
+    print("\n=== Visualize single case ===")
     np.random.seed(seed)
     env = environment_2d.Environment(10, 6, 5)
     q = env.random_query()
@@ -552,9 +554,13 @@ def benchmark(
     max_neighbors: Optional[int] = 15,
 ) -> None:
     lengths: List[Tuple[float, float]] = []
+    gains_abs: List[float] = []
+    gains_rel: List[float] = []
     success = 0
     total_build = 0.0
     total_search = 0.0
+    total_shortcut = 0.0
+    roadmap_nodes_total = 0
 
     for env_idx in range(num_env):
         env = environment_2d.Environment(10, 6, 5)
@@ -565,6 +571,7 @@ def benchmark(
         )
         stats_build = planner.build(env, seed=env_idx)
         total_build += stats_build.build_time
+        roadmap_nodes_total += stats_build.total_nodes
 
         for q_idx in range(num_queries):
             q = env.random_query()
@@ -576,6 +583,7 @@ def benchmark(
             if path_xy is not None:
                 success += 1
                 raw_len = path_length(path_xy)
+                t_sc_start = time.time()
                 shortcut = path_shortcutting(
                     path_xy,
                     env,
@@ -583,27 +591,44 @@ def benchmark(
                     step=planner.collision_check_step,
                     seed=env_idx * 10_000 + q_idx,
                 )
-                lengths.append((raw_len, path_length(shortcut)))
+                total_shortcut += time.time() - t_sc_start
+                short_len = path_length(shortcut)
+                lengths.append((raw_len, short_len))
+                gains_abs.append(raw_len - short_len)
+                if raw_len > 1e-9:
+                    gains_rel.append((raw_len - short_len) / raw_len)
 
     denom = max(1, num_env * num_queries)
-    avg_raw = float(np.mean([x for x, _ in lengths])) if lengths else float('nan')
-    avg_short = float(np.mean([y for _, y in lengths])) if lengths else float('nan')
-    print(
-        "PRM benchmark: env=%d queries/env=%d success=%d avg_len=%.3f avg_short=%.3f avg_build=%.3fs avg_search=%.3fs"
-        % (
-            num_env,
-            num_queries,
-            success,
-            avg_raw,
-            avg_short,
-            total_build / num_env,
-            total_search / denom,
-        )
-    )
+    total_cases = num_env * num_queries
+
+    if success == 0:
+        print("PRM benchmark: no successful paths.")
+        return
+
+    avg_raw = float(np.mean([x for x, _ in lengths]))
+    avg_short = float(np.mean([y for _, y in lengths]))
+    avg_gain_abs = float(np.mean(gains_abs)) if gains_abs else float('nan')
+    avg_gain_rel = float(np.mean(gains_rel)) * 100.0 if gains_rel else float('nan')
+    best_gain_rel = max(gains_rel) * 100.0 if gains_rel else float('nan')
+    worst_gain_rel = min(gains_rel) * 100.0 if gains_rel else float('nan')
+
+    print("\n=== PRM Shortcut Benchmark ===")
+    print(f"  Environments x Queries : {num_env} x {num_queries} (total {total_cases})")
+    print(f"  Successful paths       : {success} ({success/total_cases*100.0:.1f}%)")
+    print(f"  Avg roadmap build      : {total_build / max(1, num_env):.3f} s  | avg nodes: {roadmap_nodes_total / max(1, num_env):.1f}")
+    print(f"  Avg query search       : {total_search / max(1, success):.4f} s")
+    print(f"  Avg shortcut runtime   : {total_shortcut / max(1, success):.4f} s")
+    print("  Path quality (length)")
+    print(f"    Raw average           : {avg_raw:.3f}")
+    print(f"    Shortcut average      : {avg_short:.3f}")
+    print(f"    Avg absolute gain     : {avg_gain_abs:.3f}")
+    print(f"    Avg relative gain     : {avg_gain_rel:.2f}%")
+    print(f"    Best relative gain    : {best_gain_rel:.2f}%")
+    print(f"    Worst relative gain   : {worst_gain_rel:.2f}%")
 
 
 if __name__ == "__main__":
-    benchmark()
+    # benchmark()
     pl.ion()
     run_single(seed=4, n_samples=800, radius=0.6)
     pl.show()
