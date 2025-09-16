@@ -35,6 +35,10 @@ def euclid(a: Point, b: Point) -> float:
     return math.hypot(ax - bx, ay - by)
 
 
+def path_length(path: Sequence[Point]) -> float:
+    return sum(euclid(path[i], path[i + 1]) for i in range(len(path) - 1))
+
+
 def line_collision_free(p: Point, q: Point, env: environment_2d.Environment, step: float = 0.015) -> bool:
     """Check whether the segment ``p-q`` stays collision free in ``env``.
 
@@ -60,6 +64,99 @@ def line_collision_free(p: Point, q: Point, env: environment_2d.Environment, ste
         if env.check_collision(x, y):
             return False
     return True
+
+
+def _arc_lengths(path: Sequence[Point]) -> List[float]:
+    cum = [0.0]
+    for i in range(len(path) - 1):
+        cum.append(cum[-1] + euclid(path[i], path[i + 1]))
+    return cum
+
+
+def _locate_point(
+    path: Sequence[Point],
+    cum_lengths: Sequence[float],
+    s: float,
+) -> Tuple[int, float, Point]:
+    if s <= 0.0:
+        return 0, 0.0, path[0]
+    total = cum_lengths[-1]
+    if s >= total:
+        idx = len(path) - 2
+        return idx, 1.0, path[-1]
+    for idx in range(len(path) - 1):
+        if s <= cum_lengths[idx + 1]:
+            seg_len = cum_lengths[idx + 1] - cum_lengths[idx]
+            if seg_len <= 1e-9:
+                return idx, 0.0, path[idx]
+            alpha = (s - cum_lengths[idx]) / seg_len
+            px = path[idx][0] + alpha * (path[idx + 1][0] - path[idx][0])
+            py = path[idx][1] + alpha * (path[idx + 1][1] - path[idx][1])
+            return idx, alpha, (float(px), float(py))
+    idx = len(path) - 2
+    return idx, 1.0, path[-1]
+
+
+def _insert_point(
+    points: List[Point],
+    seg_index: int,
+    alpha: float,
+    point: Point,
+) -> Tuple[List[Point], int, bool]:
+    eps = 1e-6
+    if alpha <= eps:
+        return points, seg_index, False
+    if alpha >= 1.0 - eps:
+        return points, seg_index + 1, False
+    points.insert(seg_index + 1, point)
+    return points, seg_index + 1, True
+
+
+def path_shortcutting(
+    path_xy: Sequence[Point],
+    env: environment_2d.Environment,
+    *,
+    maxrep: int = 300,
+    step: float = 0.015,
+    seed: Optional[int] = None,
+) -> List[Point]:
+    if path_xy is None:
+        return []
+    if len(path_xy) < 3:
+        return list(path_xy)
+
+    rng = random.Random(seed)
+    path = [tuple(p) for p in path_xy]
+
+    for _ in range(maxrep):
+        if len(path) <= 2:
+            break
+        cum = _arc_lengths(path)
+        total_len = cum[-1]
+        if total_len <= 1e-9:
+            break
+
+        s1, s2 = sorted(rng.uniform(0.0, total_len) for _ in range(2))
+        if s2 - s1 < step:
+            continue
+
+        idx2, alpha2, point2 = _locate_point(path, cum, s2)
+        idx1, alpha1, point1 = _locate_point(path, cum, s1)
+
+        path, idx2_new, inserted2 = _insert_point(path, idx2, alpha2, point2)
+        path, idx1_new, inserted1 = _insert_point(path, idx1, alpha1, point1)
+        if inserted1 and idx1_new <= idx2_new:
+            idx2_new += 1
+
+        if idx2_new - idx1_new < 1:
+            continue
+
+        if not line_collision_free(path[idx1_new], path[idx2_new], env, step=step):
+            continue
+
+        path = path[: idx1_new + 1] + path[idx2_new:]
+
+    return path
 
 
 def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_idx: int) -> Optional[List[int]]:
@@ -132,6 +229,8 @@ class ProbabilisticRoadmap2D:
         self._tree: Optional["cKDTree"] = None
         self._env: Optional[environment_2d.Environment] = None
         self._last_build_time: float = 0.0
+        self.last_path: Optional[List[Point]] = None
+        self.last_shortcut_path: Optional[List[Point]] = None
 
     @property
     def nodes(self) -> List[Point]:
@@ -237,9 +336,12 @@ class ProbabilisticRoadmap2D:
             total_samples=self.n_samples,
             total_nodes=len(base_nodes),
         )
+        self.last_path = None
+        self.last_shortcut_path = None
         if path_idx is None:
             return None, stats
         path_xy = [base_nodes[i] for i in path_idx]
+        self.last_path = path_xy
         return path_xy, stats
 
     # --- internals -----------------------------------------------------
@@ -337,6 +439,9 @@ def prm_plan(
     max_neighbors: Optional[int] = 15,
     direct_connection: bool = True,
     visualize: bool = True,
+    apply_shortcut: bool = True,
+    shortcut_maxrep: int = 400,
+    shortcut_seed: Optional[int] = None,
 ):
     """Build a roadmap and attempt to solve a single query, preserving the
     interface of the original educational script."""
@@ -350,6 +455,20 @@ def prm_plan(
     stats_build = planner.build(env, seed=seed)
     path_xy, stats_query = planner.query((x_start, y_start), (x_goal, y_goal), direct_connection=direct_connection)
 
+    shortcut_path: Optional[List[Point]] = None
+    if path_xy is not None and apply_shortcut:
+        shortcut_seed_eff = shortcut_seed if shortcut_seed is not None else seed
+        shortcut_path = path_shortcutting(
+            path_xy,
+            env,
+            maxrep=shortcut_maxrep,
+            step=step,
+            seed=shortcut_seed_eff,
+        )
+        planner.last_shortcut_path = shortcut_path
+    else:
+        planner.last_shortcut_path = None
+
     if verbose:
         if path_xy is None:
             print(
@@ -357,11 +476,14 @@ def prm_plan(
                 % (stats_build.build_time, stats_query.search_time, stats_query.total_nodes)
             )
         else:
-            length = sum(euclid(path_xy[i], path_xy[i + 1]) for i in range(len(path_xy) - 1))
-            print(
+            length = path_length(path_xy)
+            msg = (
                 "Path found. #roadmap_nodes=%d build: %.3fs search: %.3fs length=%.3f"
                 % (len(planner.nodes), stats_build.build_time, stats_query.search_time, length)
             )
+            if shortcut_path is not None and len(shortcut_path) >= 2:
+                msg += " shortcut=%.3f" % path_length(shortcut_path)
+            print(msg)
 
     if visualize:
         pl.clf()
@@ -371,7 +493,12 @@ def prm_plan(
         if path_xy is not None:
             xs = [p[0] for p in path_xy]
             ys = [p[1] for p in path_xy]
-            pl.plot(xs, ys, "g-", linewidth=2)
+            pl.plot(xs, ys, "g-", linewidth=2, label="PRM path")
+            if shortcut_path is not None and len(shortcut_path) >= 2:
+                xs_s = [p[0] for p in shortcut_path]
+                ys_s = [p[1] for p in shortcut_path]
+                pl.plot(xs_s, ys_s, linestyle="--", linewidth=2, color="#720ab8", label="Shortcut")
+                pl.legend(loc="best")
             pl.title("PRM path")
         pl.pause(0.001)
 
@@ -424,7 +551,7 @@ def benchmark(
     radius: float = 0.6,
     max_neighbors: Optional[int] = 15,
 ) -> None:
-    lengths: List[float] = []
+    lengths: List[Tuple[float, float]] = []
     success = 0
     total_build = 0.0
     total_search = 0.0
@@ -448,17 +575,27 @@ def benchmark(
             total_search += stats_query.search_time
             if path_xy is not None:
                 success += 1
-                lengths.append(sum(euclid(path_xy[i], path_xy[i + 1]) for i in range(len(path_xy) - 1)))
+                raw_len = path_length(path_xy)
+                shortcut = path_shortcutting(
+                    path_xy,
+                    env,
+                    maxrep=400,
+                    step=planner.collision_check_step,
+                    seed=env_idx * 10_000 + q_idx,
+                )
+                lengths.append((raw_len, path_length(shortcut)))
 
     denom = max(1, num_env * num_queries)
-    avg_len = float(np.mean(lengths)) if lengths else float('nan')
+    avg_raw = float(np.mean([x for x, _ in lengths])) if lengths else float('nan')
+    avg_short = float(np.mean([y for _, y in lengths])) if lengths else float('nan')
     print(
-        "PRM benchmark: env=%d queries/env=%d success=%d avg_len=%.3f avg_build=%.3fs avg_search=%.3fs"
+        "PRM benchmark: env=%d queries/env=%d success=%d avg_len=%.3f avg_short=%.3f avg_build=%.3fs avg_search=%.3fs"
         % (
             num_env,
             num_queries,
             success,
-            avg_len,
+            avg_raw,
+            avg_short,
             total_build / num_env,
             total_search / denom,
         )
