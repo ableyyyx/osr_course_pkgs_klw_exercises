@@ -371,7 +371,7 @@ def prm_plan(
         if path_xy is not None:
             xs = [p[0] for p in path_xy]
             ys = [p[1] for p in path_xy]
-            pl.plot(xs, ys, "r-", linewidth=2)
+            pl.plot(xs, ys, "g-", linewidth=2)
             pl.title("PRM path")
         pl.pause(0.001)
 
@@ -468,5 +468,5 @@ def benchmark(
 if __name__ == "__main__":
     benchmark()
     pl.ion()
-    run_single(seed=4, n_samples=600, radius=0.6)
+    run_single(seed=4, n_samples=800, radius=0.6)
     pl.show()
