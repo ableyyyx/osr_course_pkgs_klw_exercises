@@ -159,18 +159,23 @@ def path_shortcutting(
     return path
 
 
-def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_idx: int) -> Optional[List[int]]:
-    """Shortest path using Dijkstra with a binary heap."""
+def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_idx: int) -> Tuple[Optional[List[int]], int]:
+    """Shortest path using Dijkstra with a binary heap.
+
+    Returns the path as a list of node indices and the number of nodes expanded.
+    """
     n = len(adj)
     dist = [float('inf')] * n
     prev = [-1] * n
     dist[start_idx] = 0.0
     pq: List[Tuple[float, int]] = [(0.0, start_idx)]
+    expanded = 0
 
     while pq:
         d, u = heapq.heappop(pq)
         if d > dist[u]:
             continue
+        expanded += 1
         if u == goal_idx:
             break
         for v, w in adj[u]:
@@ -181,7 +186,7 @@ def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_i
                 heapq.heappush(pq, (nd, v))
 
     if not math.isfinite(dist[goal_idx]):
-        return None
+        return None, expanded
 
     path_idx: List[int] = []
     cur = goal_idx
@@ -189,7 +194,50 @@ def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_i
         path_idx.append(cur)
         cur = prev[cur]
     path_idx.reverse()
-    return path_idx
+    return path_idx, expanded
+
+
+def _astar(
+    adj: Sequence[Sequence[Tuple[int, float]]],
+    coords: Sequence[Point],
+    start_idx: int,
+    goal_idx: int,
+) -> Tuple[Optional[List[int]], int]:
+    """A* search using the Euclidean distance as an admissible heuristic."""
+
+    n = len(adj)
+    dist = [float('inf')] * n
+    prev = [-1] * n
+    dist[start_idx] = 0.0
+    goal = coords[goal_idx]
+    pq: List[Tuple[float, int]] = [(euclid(coords[start_idx], goal), start_idx)]
+    expanded = 0
+
+    while pq:
+        f, u = heapq.heappop(pq)
+        if f > dist[u] + euclid(coords[u], goal):
+            continue
+        expanded += 1
+        if u == goal_idx:
+            break
+        for v, w in adj[u]:
+            nd = dist[u] + w
+            if nd < dist[v]:
+                dist[v] = nd
+                prev[v] = u
+                priority = nd + euclid(coords[v], goal)
+                heapq.heappush(pq, (priority, v))
+
+    if not math.isfinite(dist[goal_idx]):
+        return None, expanded
+
+    path_idx: List[int] = []
+    cur = goal_idx
+    while cur != -1:
+        path_idx.append(cur)
+        cur = prev[cur]
+    path_idx.reverse()
+    return path_idx, expanded
 
 
 @dataclass
@@ -198,6 +246,9 @@ class PRMStats:
     search_time: float
     total_samples: int
     total_nodes: int
+    algorithm: str = "dijkstra"
+    path_length: Optional[float] = None
+    expanded_nodes: Optional[int] = None
 
 
 class ProbabilisticRoadmap2D:
@@ -294,6 +345,7 @@ class ProbabilisticRoadmap2D:
         start: Point,
         goal: Point,
         direct_connection: bool = True,
+        algorithm: str = "dijkstra",
     ) -> Tuple[Optional[List[Point]], PRMStats]:
         """Plan from ``start`` to ``goal`` using the pre-built roadmap."""
         if self._env is None:
@@ -328,19 +380,30 @@ class ProbabilisticRoadmap2D:
             base_adj[goal_idx].append((j, w))
             base_adj[j].append((goal_idx, w))
 
-        path_idx = _dijkstra(base_adj, start_idx, goal_idx)
+        algo_name = algorithm.lower()
+        if algo_name not in {"dijkstra", "astar"}:
+            raise ValueError("Unsupported search algorithm: %s" % algorithm)
+
+        if algo_name == "astar":
+            path_idx, expanded = _astar(base_adj, base_nodes, start_idx, goal_idx)
+        else:
+            path_idx, expanded = _dijkstra(base_adj, start_idx, goal_idx)
+
         search_time = time.time() - t0
         stats = PRMStats(
             build_time=self._last_build_time,
             search_time=search_time,
             total_samples=self.n_samples,
             total_nodes=len(base_nodes),
+            algorithm=algo_name,
+            expanded_nodes=expanded,
         )
         self.last_path = None
         self.last_shortcut_path = None
         if path_idx is None:
             return None, stats
         path_xy = [base_nodes[i] for i in path_idx]
+        stats.path_length = path_length(path_xy)
         self.last_path = path_xy
         return path_xy, stats
 
@@ -442,6 +505,7 @@ def prm_plan(
     apply_shortcut: bool = True,
     shortcut_maxrep: int = 400,
     shortcut_seed: Optional[int] = None,
+    search_algorithm: str = "dijkstra",
 ):
     """Build a roadmap and attempt to solve a single query, preserving the
     interface of the original educational script."""
@@ -453,7 +517,12 @@ def prm_plan(
         collision_check_step=step,
     )
     stats_build = planner.build(env, seed=seed)
-    path_xy, stats_query = planner.query((x_start, y_start), (x_goal, y_goal), direct_connection=direct_connection)
+    path_xy, stats_query = planner.query(
+        (x_start, y_start),
+        (x_goal, y_goal),
+        direct_connection=direct_connection,
+        algorithm=search_algorithm,
+    )
 
     shortcut_path: Optional[List[Point]] = None
     if path_xy is not None and apply_shortcut:
@@ -476,9 +545,9 @@ def prm_plan(
                 % (stats_build.build_time, stats_query.search_time, stats_query.total_nodes)
             )
         else:
-            raw_len = path_length(path_xy)
+            raw_len = stats_query.path_length or path_length(path_xy)
             msgs = [
-                "Path found:",
+                f"Path found using {stats_query.algorithm.upper()}:",
                 "  roadmap nodes : %d" % len(planner.nodes),
                 "  build time    : %.3fs" % stats_build.build_time,
                 "  search time   : %.3fs" % stats_query.search_time,
@@ -513,7 +582,7 @@ def prm_plan(
             pl.title("PRM path")
         pl.pause(0.001)
 
-    return path_xy, planner
+    return path_xy, planner, stats_query
 
 
 def _draw_roadmap(planner: ProbabilisticRoadmap2D) -> None:
@@ -533,7 +602,14 @@ def _draw_roadmap(planner: ProbabilisticRoadmap2D) -> None:
             pl.plot([xi, xj], [yi, yj], "k-", alpha=0.1)
 
 
-def run_single(seed: int = 4, n_samples: int = 600, radius: float = 0.6) -> Optional[List[Point]]:
+def run_single(
+    seed: int = 4,
+    n_samples: int = 600,
+    radius: float = 0.6,
+    algorithms: Sequence[str] = ("dijkstra", "astar"),
+    visualize_path: bool = True,
+    show_hist: bool = True,
+) -> Optional[dict]:
     print("\n=== Visualize single case ===")
     np.random.seed(seed)
     env = environment_2d.Environment(10, 6, 5)
@@ -541,19 +617,141 @@ def run_single(seed: int = 4, n_samples: int = 600, radius: float = 0.6) -> Opti
     if q is None:
         print("No query generated")
         return None
+
     x_start, y_start, x_goal, y_goal = q
-    path_xy, _ = prm_plan(
-        env,
-        x_start,
-        y_start,
-        x_goal,
-        y_goal,
+    planner = ProbabilisticRoadmap2D(
         n_samples=n_samples,
-        radius=radius,
-        seed=seed,
-        visualize=True,
+        connection_radius=radius,
     )
-    return path_xy
+    stats_build = planner.build(env, seed=seed)
+
+    results = {}
+    for idx, algo in enumerate(algorithms):
+        path_xy, stats_query = planner.query(
+            (x_start, y_start),
+            (x_goal, y_goal),
+            algorithm=algo,
+        )
+        shortcut_path: Optional[List[Point]] = None
+        if path_xy is not None:
+            shortcut_candidate = path_shortcutting(
+                path_xy,
+                env,
+                maxrep=400,
+                step=planner.collision_check_step,
+                seed=(seed if seed is not None else 0) + idx,
+            )
+            if shortcut_candidate and len(shortcut_candidate) >= 2:
+                shortcut_path = shortcut_candidate
+        results[algo.lower()] = {
+            "path": path_xy,
+            "stats": stats_query,
+            "shortcut": shortcut_path,
+        }
+
+    if visualize_path:
+        # primary_algo = algorithms[0].lower()
+        color_map = {
+            "dijkstra": "#4daf4a",
+            "astar": "#377eb8",
+        }
+        shortcut_map = {
+            "dijkstra": "#814131",
+            "astar": "#b937a7",
+        }
+        pl.figure("prm_run_single_path")
+        pl.clf()
+        env.plot()
+        env.plot_query(x_start, y_start, x_goal, y_goal)
+        _draw_roadmap(planner)
+        for algo in algorithms:
+            key = algo.lower()
+            res = results.get(key)
+            if not res:
+                continue
+            path_raw = res.get("path")
+            path_short = res.get("shortcut")
+            if path_raw is not None:
+                xs = [p[0] for p in path_raw]
+                ys = [p[1] for p in path_raw]
+                pl.plot(
+                    xs,
+                    ys,
+                    color=color_map.get(key, None),
+                    linewidth=2,
+                    label=f"{key.upper()} raw",
+                )
+            if path_short is not None and len(path_short) >= 2:
+                xs_s = [p[0] for p in path_short]
+                ys_s = [p[1] for p in path_short]
+                pl.plot(
+                    xs_s,
+                    ys_s,
+                    linestyle="--",
+                    linewidth=2,
+                    color=shortcut_map.get(key, "#555555"),
+                    label=f"{key.upper()} shortcut",
+                )
+        pl.title("PRM path comparison")
+        pl.legend(loc="best")
+        pl.pause(0.001)
+
+    if show_hist:
+        labels = []
+        search_times = []
+        path_lengths = []
+        expansions = []
+        for algo in algorithms:
+            key = algo.lower()
+            res = results.get(key)
+            if res is None or res["path"] is None:
+                continue
+            stats = res["stats"]
+            labels.append(key.upper())
+            search_times.append(stats.search_time)
+            path_lengths.append(stats.path_length if stats.path_length is not None else path_length(res["path"]))
+            expansions.append(stats.expanded_nodes or 0)
+
+        if labels:
+            fig, axes = pl.subplots(1, 2, figsize=(10, 4))
+            axes[0].bar(labels, search_times, color=["#1b9e77", "#d95f02"][: len(labels)])
+            axes[0].set_title("Search Time (s)")
+            axes[0].set_ylabel("seconds")
+            axes[1].bar(labels, expansions, color=["#7570b3", "#e7298a"][: len(labels)])
+            axes[1].set_title("Expanded Nodes")
+            axes[1].set_ylabel("count")
+            for ax in axes:
+                ax.set_ylim(bottom=0)
+            fig.suptitle("Algorithm Comparison")
+            fig.tight_layout()
+
+    print(f"Roadmap build time: {stats_build.build_time:.3f}s (nodes={stats_build.total_nodes})")
+    for algo in algorithms:
+        key = algo.lower()
+        res = results.get(key)
+        if res is None or res["path"] is None:
+            print(f"  {algo.upper()}: failed to find a path")
+            continue
+        stats = res["stats"]
+        raw_len = stats.path_length if stats.path_length is not None else path_length(res["path"])
+        short = res.get("shortcut")
+        short_len = path_length(short) if short is not None else float("nan")
+        gain = raw_len - short_len if short is not None else float("nan")
+        gain_pct = (gain / raw_len * 100.0) if short is not None and raw_len > 1e-9 else float("nan")
+        print(
+            "  %s -> time: %.3fs | length: %.3f | shortcut: %s | gain: %s (%.2f%%) | expanded: %s"
+            % (
+                algo.upper(),
+                stats.search_time,
+                raw_len,
+                f"{short_len:.3f}" if short else "n/a",
+                f"{gain:.3f}" if short else "n/a",
+                gain_pct if not math.isnan(gain_pct) else float("nan"),
+                stats.expanded_nodes if stats.expanded_nodes is not None else "n/a",
+            )
+        )
+
+    return results
 
 
 def benchmark(
@@ -562,15 +760,15 @@ def benchmark(
     n_samples: int = 600,
     radius: float = 0.6,
     max_neighbors: Optional[int] = 15,
+    algorithms: Sequence[str] = ("dijkstra", "astar"),
+    show_hist: bool = True,
 ) -> None:
-    lengths: List[Tuple[float, float]] = []
-    gains_abs: List[float] = []
-    gains_rel: List[float] = []
-    success = 0
     total_build = 0.0
-    total_search = 0.0
-    total_shortcut = 0.0
     roadmap_nodes_total = 0
+    metrics = {
+        algo.lower(): {"times": [], "lengths": [], "expanded": [], "success": 0}
+        for algo in algorithms
+    }
 
     for env_idx in range(num_env):
         env = environment_2d.Environment(10, 6, 5)
@@ -588,57 +786,68 @@ def benchmark(
             if q is None:
                 continue
             x_start, y_start, x_goal, y_goal = q
-            path_xy, stats_query = planner.query((x_start, y_start), (x_goal, y_goal))
-            total_search += stats_query.search_time
-            if path_xy is not None:
-                success += 1
-                raw_len = path_length(path_xy)
-                t_sc_start = time.time()
-                shortcut = path_shortcutting(
-                    path_xy,
-                    env,
-                    maxrep=400,
-                    step=planner.collision_check_step,
-                    seed=env_idx * 10_000 + q_idx,
+            for algo in algorithms:
+                key = algo.lower()
+                path_xy, stats_query = planner.query(
+                    (x_start, y_start),
+                    (x_goal, y_goal),
+                    algorithm=algo,
                 )
-                total_shortcut += time.time() - t_sc_start
-                short_len = path_length(shortcut)
-                lengths.append((raw_len, short_len))
-                gains_abs.append(raw_len - short_len)
-                if raw_len > 1e-9:
-                    gains_rel.append((raw_len - short_len) / raw_len)
+                if path_xy is None:
+                    continue
+                metrics[key]["success"] += 1
+                metrics[key]["times"].append(stats_query.search_time)
+                metrics[key]["lengths"].append(stats_query.path_length or path_length(path_xy))
+                if stats_query.expanded_nodes is not None:
+                    metrics[key]["expanded"].append(stats_query.expanded_nodes)
 
-    # denom = max(1, num_env * num_queries)
     total_cases = num_env * num_queries
 
-    if success == 0:
-        print("PRM benchmark: no successful paths.")
-        return
-
-    avg_raw = float(np.mean([x for x, _ in lengths]))
-    avg_short = float(np.mean([y for _, y in lengths]))
-    avg_gain_abs = float(np.mean(gains_abs)) if gains_abs else float('nan')
-    avg_gain_rel = float(np.mean(gains_rel)) * 100.0 if gains_rel else float('nan')
-    best_gain_rel = max(gains_rel) * 100.0 if gains_rel else float('nan')
-    worst_gain_rel = min(gains_rel) * 100.0 if gains_rel else float('nan')
-
-    print("\n=== PRM Shortcut Benchmark ===")
+    print("\n=== PRM Benchmark (algorithm comparison) ===")
     print(f"  Environments x Queries : {num_env} x {num_queries} (total {total_cases})")
-    print(f"  Successful paths       : {success} ({success/total_cases*100.0:.1f}%)")
     print(f"  Avg roadmap build      : {total_build / max(1, num_env):.3f} s  | avg nodes: {roadmap_nodes_total / max(1, num_env):.1f}")
-    print(f"  Avg query search       : {total_search / max(1, success):.4f} s")
-    print(f"  Avg shortcut runtime   : {total_shortcut / max(1, success):.4f} s")
-    print("  Path quality (length)")
-    print(f"    Raw average           : {avg_raw:.3f}")
-    print(f"    Shortcut average      : {avg_short:.3f}")
-    print(f"    Avg absolute gain     : {avg_gain_abs:.3f}")
-    print(f"    Avg relative gain     : {avg_gain_rel:.2f}%")
-    print(f"    Best relative gain    : {best_gain_rel:.2f}%")
-    print(f"    Worst relative gain   : {worst_gain_rel:.2f}%")
+
+    labels: List[str] = []
+    avg_times: List[float] = []
+    avg_expanded: List[float] = []
+
+    for algo in algorithms:
+        key = algo.lower()
+        data = metrics[key]
+        succ = data["success"]
+        labels.append(key.upper())
+        if succ == 0:
+            print(f"  {algo.upper()}: no successful paths")
+            avg_times.append(0.0)
+            avg_expanded.append(0.0)
+            continue
+        avg_time = float(np.mean(data["times"]))
+        avg_len = float(np.mean(data["lengths"]))
+        avg_exp = float(np.mean(data["expanded"])) if data["expanded"] else 0.0
+        avg_times.append(avg_time)
+        avg_expanded.append(avg_exp)
+        print(
+            f"  {algo.upper():8s} -> success: {succ}/{total_cases}  avg_time: {avg_time:.4f}s  avg_length: {avg_len:.3f}  avg_expanded: {avg_exp:.1f}"
+        )
+
+    if show_hist and any(metrics[a.lower()]["success"] > 0 for a in algorithms):
+        fig, axes = pl.subplots(1, 2, figsize=(10, 4))
+        axes[0].bar(labels, avg_times, color=["#1b9e77", "#d95f02", "#7570b3", "#e7298a"][: len(labels)])
+        axes[0].set_title("Average Search Time")
+        axes[0].set_ylabel("seconds")
+        axes[0].set_ylim(bottom=0)
+
+        axes[1].bar(labels, avg_expanded, color=["#66a61e", "#e6ab02", "#a6761d", "#666666"][: len(labels)])
+        axes[1].set_title("Average Expanded Nodes")
+        axes[1].set_ylabel("count")
+        axes[1].set_ylim(bottom=0)
+        fig.suptitle("Algorithm Benchmark Comparison")
+        fig.tight_layout()
+
 
 
 if __name__ == "__main__":
-    # benchmark()
     pl.ion()
+    # benchmark()
     run_single(seed=4, n_samples=800, radius=0.6)
     pl.show()
