@@ -1,30 +1,58 @@
 # -*- coding: utf-8 -*-
-"""
-PRM for 2D motion planning in the OSR environment.
+"""Probabilistic roadmap (PRM) planner for the 2D OSR environments."""
+from __future__ import annotations
 
-"""
-import sys, time, math, random
+import math
+import random
+import time
+import heapq
+from dataclasses import dataclass
+from typing import Iterable, List, Optional, Sequence, Tuple
+
 import numpy as np
 import pylab as pl
 
-# find environment_2d.py
+import sys
+
+# Ensure the environment module can be imported when the script is run directly.
 if 'osr_examples/scripts/' not in sys.path:
     sys.path.append('osr_examples/scripts/')
 
-import environment_2d  # from the course repo
+import environment_2d  # type: ignore
 
-# ---------- general tools ----------
-def line_collision_free(p, q, env, step=0.01):
+try:  # Optional acceleration for neighbor search
+    from scipy.spatial import cKDTree  # type: ignore
+except Exception:  # pragma: no cover - SciPy may be unavailable on some setups
+    cKDTree = None
+
+Point = Tuple[float, float]
+
+
+def euclid(a: Point, b: Point) -> float:
+    """Return the Euclidean distance between two planar points."""
+    ax, ay = a
+    bx, by = b
+    return math.hypot(ax - bx, ay - by)
+
+
+def line_collision_free(p: Point, q: Point, env: environment_2d.Environment, step: float = 0.015) -> bool:
+    """Check whether the segment ``p-q`` stays collision free in ``env``.
+
+    The segment is discretised with a step that scales with the segment length, so
+    small features are sampled densely enough while keeping long-range checks
+    inexpensive.
     """
-    以固定步长在 [p,q] 上采样，调用 env.check_collision(x,y) 判定是否碰撞。
-    返回 True 表示整段无碰撞。
-    """
-    px, py = p; qx, qy = q
+    px, py = p
+    qx, qy = q
     dx, dy = qx - px, qy - py
     dist = math.hypot(dx, dy)
-    if dist == 0:
+    if dist == 0.0:
         return not env.check_collision(px, py)
-    n = max(2, int(dist / step))
+
+    # Sample proportionally to distance, but cap the number of tests to avoid
+    # excessive evaluations on long straight segments.
+    step = max(1e-3, step)
+    n = max(2, min(int(dist / step) + 1, 500))
     for i in range(n + 1):
         t = float(i) / n
         x = px + t * dx
@@ -33,44 +61,32 @@ def line_collision_free(p, q, env, step=0.01):
             return False
     return True
 
-def euclid(a, b):
-    ax, ay = a; bx, by = b
-    return math.hypot(ax - bx, ay - by)
 
-def dijkstra(adj, start_idx, goal_idx):
-    """
-    简易 Dijkstra，在小图上足够好用。
-    adj: 邻接表 list[ list[(v, w)] ] ，v 为邻居索引，w 为边长
-    返回：节点索引路径(list)；若不可达返回 None
-    """
+def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_idx: int) -> Optional[List[int]]:
+    """Shortest path using Dijkstra with a binary heap."""
     n = len(adj)
-    INF = 1e100
-    dist = [INF]*n
-    prev = [-1]*n
-    used = [False]*n
+    dist = [float('inf')] * n
+    prev = [-1] * n
     dist[start_idx] = 0.0
+    pq: List[Tuple[float, int]] = [(0.0, start_idx)]
 
-    for _ in range(n):
-        # Select the undetermined minimum dist
-        u = -1
-        best = INF
-        for i in range(n):
-            if (not used[i]) and dist[i] < best:
-                best = dist[i]; u = i
-        if u < 0 or u == goal_idx: break
-        used[u] = True
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        if u == goal_idx:
+            break
         for v, w in adj[u]:
-            if used[v]: continue
-            nd = dist[u] + w
+            nd = d + w
             if nd < dist[v]:
                 dist[v] = nd
                 prev[v] = u
+                heapq.heappush(pq, (nd, v))
 
-    if dist[goal_idx] >= INF/2:
+    if not math.isfinite(dist[goal_idx]):
         return None
 
-    # Backtracking Path
-    path_idx = []
+    path_idx: List[int] = []
     cur = goal_idx
     while cur != -1:
         path_idx.append(cur)
@@ -78,112 +94,379 @@ def dijkstra(adj, start_idx, goal_idx):
     path_idx.reverse()
     return path_idx
 
-# ---------- PRM Main Process ----------
-def prm_plan(env, x_start, y_start, x_goal, y_goal,
-             n_samples=500, radius=0.6, step=0.01, seed=4, verbose=True):
-    """
-    Generate a PRM and use Dijkstra search on the graph。
-    - n_samples: Number of free space sampling points (excluding start and end points)
-    - radius:    Try edge radius
-    - step:      Sampling step size for line collision detection
-    """
-    rng = random.Random(seed)
-    pl.clf(); env.plot(); env.plot_query(x_start, y_start, x_goal, y_goal)
 
-    # Collecting free-space samples
-    nodes = [(x_start, y_start), (x_goal, y_goal)]
-    tried = 0
-    while len(nodes) < n_samples + 2:
-        x = rng.uniform(0.0, env.size_x)
-        y = rng.uniform(0.0, env.size_y)
-        if not env.check_collision(x, y):
-            nodes.append((x, y))
-        tried += 1
-        # Draw a small number of visualization points
-        if tried % 50 == 0:
-            pl.plot([x], [y], ".", alpha=0.2); pl.pause(0.001)
+@dataclass
+class PRMStats:
+    build_time: float
+    search_time: float
+    total_samples: int
+    total_nodes: int
 
-    n = len(nodes)
-    adj = [[] for _ in range(n)]
 
-    # Try connecting edges within the radius
-    t0 = time.time()
-    for i in range(n):
-        for j in range(i+1, n):
-            if euclid(nodes[i], nodes[j]) <= radius:
-                if line_collision_free(nodes[i], nodes[j], env, step=step):
-                    w = euclid(nodes[i], nodes[j])
-                    adj[i].append((j, w))
-                    adj[j].append((i, w))
-                    # Visualize edges (draw them sparsely to avoid being too slow)
-                    if (i % 25 == 0) and (j % 25 == 0):
-                        pl.plot([nodes[i][0], nodes[j][0]],
-                                [nodes[i][1], nodes[j][1]], "k-", alpha=0.15)
-    t_build = time.time() - t0
+class ProbabilisticRoadmap2D:
+    """Reusable PRM planner that separates roadmap construction from queries."""
 
-    # Start and end index
-    s_idx, g_idx = 0, 1
+    def __init__(
+        self,
+        n_samples: int = 600,
+        connection_radius: float = 0.6,
+        max_neighbors: Optional[int] = 15,
+        collision_check_step: float = 0.015,
+        max_sample_attempts: int = 20,
+        rng: Optional[random.Random] = None,
+    ) -> None:
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive")
+        if connection_radius <= 0.0:
+            raise ValueError("connection_radius must be positive")
+        self.n_samples = n_samples
+        self.connection_radius = connection_radius
+        self.max_neighbors = max_neighbors
+        self.collision_check_step = collision_check_step
+        self.max_sample_attempts = max_sample_attempts
+        self._rng = rng or random.Random()
 
-    # search
-    t1 = time.time()
-    path_idx = dijkstra(adj, s_idx, g_idx)
-    t_search = time.time() - t1
-    if path_idx is None:
-        if verbose:
-            print("No path found. build: %.3fs, search: %.3fs" % (t_build, t_search))
-        return None, nodes, adj, (t_build, t_search)
+        self._nodes: List[Point] = []
+        self._points: Optional[np.ndarray] = None
+        self._adj: List[List[Tuple[int, float]]] = []
+        self._tree: Optional["cKDTree"] = None
+        self._env: Optional[environment_2d.Environment] = None
+        self._last_build_time: float = 0.0
 
-    path_xy = [nodes[i] for i in path_idx]
+    @property
+    def nodes(self) -> List[Point]:
+        return self._nodes
+
+    @property
+    def adjacency(self) -> List[List[Tuple[int, float]]]:
+        return self._adj
+
+    @property
+    def environment(self) -> Optional[environment_2d.Environment]:
+        return self._env
+
+    def build(self, env: environment_2d.Environment, seed: Optional[int] = None) -> PRMStats:
+        """Sample ``n_samples`` configurations and build a roadmap for ``env``."""
+        if seed is not None:
+            self._rng.seed(seed)
+
+        self._env = env
+        samples: List[Point] = []
+        attempts_per_sample = max(1, self.max_sample_attempts)
+        max_failures = attempts_per_sample * self.n_samples
+        failures = 0
+
+        while len(samples) < self.n_samples:
+            x = self._rng.uniform(0.0, env.size_x)
+            y = self._rng.uniform(0.0, env.size_y)
+            if env.check_collision(x, y):
+                failures += 1
+                if failures > max_failures:
+                    raise RuntimeError("Sampling stalled – increase workspace size or radius")
+                continue
+            samples.append((x, y))
+
+        points = np.asarray(samples)
+        t0 = time.time()
+        candidate_lists = self._candidate_neighbors(points)
+        adj: List[List[Tuple[int, float]]] = [[] for _ in range(len(samples))]
+        for i, neighbors in enumerate(candidate_lists):
+            pi = samples[i]
+            for j in neighbors:
+                if j <= i:
+                    continue
+                pj = samples[j]
+                if line_collision_free(pi, pj, env, step=self.collision_check_step):
+                    weight = euclid(pi, pj)
+                    adj[i].append((j, weight))
+                    adj[j].append((i, weight))
+        build_time = time.time() - t0
+
+        self._nodes = samples
+        self._points = points
+        self._adj = adj
+        self._last_build_time = build_time
+        self._tree = cKDTree(points) if cKDTree is not None else None
+
+        return PRMStats(build_time=build_time, search_time=0.0, total_samples=len(samples), total_nodes=len(samples))
+
+    def query(
+        self,
+        start: Point,
+        goal: Point,
+        direct_connection: bool = True,
+    ) -> Tuple[Optional[List[Point]], PRMStats]:
+        """Plan from ``start`` to ``goal`` using the pre-built roadmap."""
+        if self._env is None:
+            raise RuntimeError("Roadmap not built – call build() first")
+        env = self._env
+        if env.check_collision(*start):
+            raise ValueError("Start lies in collision")
+        if env.check_collision(*goal):
+            raise ValueError("Goal lies in collision")
+
+        base_nodes = list(self._nodes)
+        base_adj = [list(neigh) for neigh in self._adj]
+
+        start_idx = len(base_nodes)
+        goal_idx = len(base_nodes) + 1
+        base_nodes.extend([start, goal])
+        base_adj.extend([[], []])
+
+        t0 = time.time()
+        start_neighbors = self._connect_to_graph(start)
+        goal_neighbors = self._connect_to_graph(goal)
+
+        if direct_connection and line_collision_free(start, goal, env, step=self.collision_check_step):
+            dist_start_goal = euclid(start, goal)
+            start_neighbors.append((goal_idx, dist_start_goal))
+            goal_neighbors.append((start_idx, dist_start_goal))
+
+        for j, w in start_neighbors:
+            base_adj[start_idx].append((j, w))
+            base_adj[j].append((start_idx, w))
+        for j, w in goal_neighbors:
+            base_adj[goal_idx].append((j, w))
+            base_adj[j].append((goal_idx, w))
+
+        path_idx = _dijkstra(base_adj, start_idx, goal_idx)
+        search_time = time.time() - t0
+        stats = PRMStats(
+            build_time=self._last_build_time,
+            search_time=search_time,
+            total_samples=self.n_samples,
+            total_nodes=len(base_nodes),
+        )
+        if path_idx is None:
+            return None, stats
+        path_xy = [base_nodes[i] for i in path_idx]
+        return path_xy, stats
+
+    # --- internals -----------------------------------------------------
+    def _candidate_neighbors(self, points: np.ndarray) -> List[List[int]]:
+        n = len(points)
+        if n == 0:
+            return []
+        radius_sq = self.connection_radius ** 2
+        max_neighbors = self.max_neighbors
+
+        if cKDTree is not None:
+            tree = cKDTree(points)
+            neighbor_lists = []
+            for i in range(n):
+                idxs = tree.query_ball_point(points[i], self.connection_radius)
+                filtered = [j for j in idxs if j != i]
+                if filtered and max_neighbors is not None:
+                    filtered = self._select_nearest(points, i, filtered, max_neighbors)
+                neighbor_lists.append(filtered)
+            return neighbor_lists
+
+        # Fallback: brute-force search
+        neighbor_lists = [[] for _ in range(n)]
+        for i in range(n):
+            pi = points[i]
+            for j in range(i + 1, n):
+                pj = points[j]
+                if np.sum((pi - pj) ** 2) <= radius_sq:
+                    neighbor_lists[i].append(j)
+                    neighbor_lists[j].append(i)
+
+        if max_neighbors is not None:
+            for i in range(n):
+                if len(neighbor_lists[i]) > max_neighbors:
+                    neighbor_lists[i] = self._select_nearest(points, i, neighbor_lists[i], max_neighbors)
+        return neighbor_lists
+
+    def _select_nearest(self, points: np.ndarray, index: int, candidates: Iterable[int], k: int) -> List[int]:
+        cand = list(candidates)
+        if len(cand) <= k:
+            return cand
+        pi = points[index]
+        dists = [(float(np.linalg.norm(points[j] - pi)), j) for j in cand]
+        dists.sort()
+        return [j for _, j in dists[:k]]
+
+    def _connect_to_graph(self, point: Point) -> List[Tuple[int, float]]:
+        if self._env is None:
+            raise RuntimeError("Roadmap not built – call build() first")
+        env = self._env
+        if self._points is None or not len(self._points):
+            return []
+
+        if self._tree is not None:
+            idxs = [i for i in self._tree.query_ball_point(point, self.connection_radius) if i < len(self._nodes)]
+        else:
+            diff = self._points - point
+            d2 = np.einsum('ij,ij->i', diff, diff)
+            idxs = [int(i) for i in np.where(d2 <= self.connection_radius ** 2)[0]]
+
+        if not idxs:
+            return []
+
+        distances = [float(np.linalg.norm(self._points[idx] - point)) for idx in idxs]
+        order = list(range(len(idxs)))
+        order.sort(key=lambda k: distances[k])
+        if self.max_neighbors is not None:
+            order = order[: self.max_neighbors]
+
+        neighbors: List[Tuple[int, float]] = []
+        for k in order:
+            idx = idxs[k]
+            dist = distances[k]
+            node = self._nodes[idx]
+            if line_collision_free(point, node, env, step=self.collision_check_step):
+                neighbors.append((idx, dist))
+        return neighbors
+
+
+# ---------------------------------------------------------------------------
+# Convenience helpers mirroring the original script API
+# ---------------------------------------------------------------------------
+
+def prm_plan(
+    env: environment_2d.Environment,
+    x_start: float,
+    y_start: float,
+    x_goal: float,
+    y_goal: float,
+    n_samples: int = 600,
+    radius: float = 0.6,
+    step: float = 0.015,
+    seed: Optional[int] = None,
+    verbose: bool = True,
+    max_neighbors: Optional[int] = 15,
+    direct_connection: bool = True,
+    visualize: bool = True,
+):
+    """Build a roadmap and attempt to solve a single query, preserving the
+    interface of the original educational script."""
+
+    planner = ProbabilisticRoadmap2D(
+        n_samples=n_samples,
+        connection_radius=radius,
+        max_neighbors=max_neighbors,
+        collision_check_step=step,
+    )
+    stats_build = planner.build(env, seed=seed)
+    path_xy, stats_query = planner.query((x_start, y_start), (x_goal, y_goal), direct_connection=direct_connection)
+
     if verbose:
-        print("Path found. #nodes=%d  build: %.3fs  search: %.3fs  length=%.3f"
-              % (n, t_build, t_search,
-                 sum(euclid(path_xy[i], path_xy[i+1]) for i in range(len(path_xy)-1))))
+        if path_xy is None:
+            print(
+                "No path found. build: %.3fs search: %.3fs nodes=%d"
+                % (stats_build.build_time, stats_query.search_time, stats_query.total_nodes)
+            )
+        else:
+            length = sum(euclid(path_xy[i], path_xy[i + 1]) for i in range(len(path_xy) - 1))
+            print(
+                "Path found. #roadmap_nodes=%d build: %.3fs search: %.3fs length=%.3f"
+                % (len(planner.nodes), stats_build.build_time, stats_query.search_time, length)
+            )
 
-    # draw final path
-    xs = [p[0] for p in path_xy]; ys = [p[1] for p in path_xy]
-    pl.plot(xs, ys, "r-", linewidth=2)
-    pl.title("PRM path")
-    pl.pause(0.001)
-    return path_xy, nodes, adj, (t_build, t_search)
+    if visualize:
+        pl.clf()
+        env.plot()
+        env.plot_query(x_start, y_start, x_goal, y_goal)
+        _draw_roadmap(planner)
+        if path_xy is not None:
+            xs = [p[0] for p in path_xy]
+            ys = [p[1] for p in path_xy]
+            pl.plot(xs, ys, "r-", linewidth=2)
+            pl.title("PRM path")
+        pl.pause(0.001)
 
-def run_single(seed=4, n_samples=500, radius=0.6):
+    return path_xy, planner
+
+
+def _draw_roadmap(planner: ProbabilisticRoadmap2D) -> None:
+    # Light-weight visualisation helper; keeps plotting optional for production use.
+    nodes = planner.nodes
+    adj = planner.adjacency
+    if not nodes:
+        return
+    xs, ys = zip(*nodes)
+    pl.plot(xs, ys, ".", alpha=0.3)
+    for i, neighbors in enumerate(adj):
+        xi, yi = nodes[i]
+        for j, _ in neighbors:
+            if j <= i:
+                continue
+            xj, yj = nodes[j]
+            pl.plot([xi, xj], [yi, yj], "k-", alpha=0.1)
+
+
+def run_single(seed: int = 4, n_samples: int = 600, radius: float = 0.6) -> Optional[List[Point]]:
     np.random.seed(seed)
     env = environment_2d.Environment(10, 6, 5)
-    pl.clf(); env.plot()
     q = env.random_query()
     if q is None:
-        print("No query generated"); return
+        print("No query generated")
+        return None
     x_start, y_start, x_goal, y_goal = q
-    env.plot_query(x_start, y_start, x_goal, y_goal)
-    path_xy, nodes, adj, times = prm_plan(env, x_start, y_start, x_goal, y_goal,
-                                          n_samples=n_samples, radius=radius, seed=seed)
+    path_xy, _ = prm_plan(
+        env,
+        x_start,
+        y_start,
+        x_goal,
+        y_goal,
+        n_samples=n_samples,
+        radius=radius,
+        seed=seed,
+        visualize=True,
+    )
     return path_xy
 
-# ------- Batch experiments: multiple endpoints/multiple environments -------
-def benchmark(num_env=3, num_queries=5, n_samples=600, radius=0.6):
-    lens, succ = [], 0
-    t_build_all, t_search_all = 0.0, 0.0
-    for e in range(num_env):
+
+def benchmark(
+    num_env: int = 3,
+    num_queries: int = 5,
+    n_samples: int = 600,
+    radius: float = 0.6,
+    max_neighbors: Optional[int] = 15,
+) -> None:
+    lengths: List[float] = []
+    success = 0
+    total_build = 0.0
+    total_search = 0.0
+
+    for env_idx in range(num_env):
         env = environment_2d.Environment(10, 6, 5)
-        for qid in range(num_queries):
+        planner = ProbabilisticRoadmap2D(
+            n_samples=n_samples,
+            connection_radius=radius,
+            max_neighbors=max_neighbors,
+        )
+        stats_build = planner.build(env, seed=env_idx)
+        total_build += stats_build.build_time
+
+        for q_idx in range(num_queries):
             q = env.random_query()
-            if q is None: continue
+            if q is None:
+                continue
             x_start, y_start, x_goal, y_goal = q
-            path_xy, _, _, (tb, ts) = prm_plan(env, x_start, y_start, x_goal, y_goal,
-                                               n_samples=n_samples, radius=radius,
-                                               seed=(e*100+qid), verbose=False)
-            t_build_all += tb; t_search_all += ts
+            path_xy, stats_query = planner.query((x_start, y_start), (x_goal, y_goal))
+            total_search += stats_query.search_time
             if path_xy is not None:
-                succ += 1
-                lens.append(sum(euclid(path_xy[i], path_xy[i+1]) for i in range(len(path_xy)-1)))
-    print("PRM benchmark: env=%d queries/env=%d  success=%d  avg_len=%.3f  avg_build=%.3fs  avg_search=%.3fs"
-          % (num_env, num_queries, succ,
-             (np.mean(lens) if lens else float('nan')),
-             t_build_all/(num_env*num_queries), t_search_all/(num_env*num_queries)))
+                success += 1
+                lengths.append(sum(euclid(path_xy[i], path_xy[i + 1]) for i in range(len(path_xy) - 1)))
+
+    denom = max(1, num_env * num_queries)
+    avg_len = float(np.mean(lengths)) if lengths else float('nan')
+    print(
+        "PRM benchmark: env=%d queries/env=%d success=%d avg_len=%.3f avg_build=%.3fs avg_search=%.3fs"
+        % (
+            num_env,
+            num_queries,
+            success,
+            avg_len,
+            total_build / num_env,
+            total_search / denom,
+        )
+    )
+
 
 if __name__ == "__main__":
-    # single-run
-    # run_single(seed=4, n_samples=600, radius=0.6)
-
-    # benchmark
     benchmark()
+    pl.ion()
+    run_single(seed=4, n_samples=600, radius=0.6)
+    pl.show()
