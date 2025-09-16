@@ -608,7 +608,7 @@ def benchmark(
                 if raw_len > 1e-9:
                     gains_rel.append((raw_len - short_len) / raw_len)
 
-    denom = max(1, num_env * num_queries)
+    # denom = max(1, num_env * num_queries)
     total_cases = num_env * num_queries
 
     if success == 0:
