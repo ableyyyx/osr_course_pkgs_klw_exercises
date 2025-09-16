@@ -472,19 +472,29 @@ def prm_plan(
     if verbose:
         if path_xy is None:
             print(
-                "No path found. build: %.3fs search: %.3fs nodes=%d"
+                "No path found. build: %.3fs  search: %.3fs  nodes=%d"
                 % (stats_build.build_time, stats_query.search_time, stats_query.total_nodes)
             )
         else:
-            length = path_length(path_xy)
-            msg = (
-                "Path found. #roadmap_nodes=%d build: %.3fs search: %.3fs length=%.3f"
-                % (len(planner.nodes), stats_build.build_time, stats_query.search_time, length)
-            )
+            raw_len = path_length(path_xy)
+            msgs = [
+                "Path found:",
+                "  roadmap nodes : %d" % len(planner.nodes),
+                "  build time    : %.3fs" % stats_build.build_time,
+                "  search time   : %.3fs" % stats_query.search_time,
+                "  raw length    : %.3f" % raw_len,
+            ]
             if shortcut_path is not None and len(shortcut_path) >= 2:
-                msg += " shortcut=%.3f" % path_length(shortcut_path)
-                msg += " "
-            print(msg)
+                short_len = path_length(shortcut_path)
+                gain_abs = raw_len - short_len
+                gain_rel = (gain_abs / raw_len) * 100.0 if raw_len > 1e-9 else float("nan")
+                msgs.extend(
+                    [
+                        "  shortcut len : %.3f" % short_len,
+                        "  gain         : %.3f (%.2f%% shorter)" % (gain_abs, gain_rel),
+                    ]
+                )
+            print("\n".join(msgs))
 
     if visualize:
         pl.clf()
