@@ -74,9 +74,9 @@ def _arc_lengths(path: Sequence[Point]) -> List[float]:
 
 
 def _locate_point(
-    path: Sequence[Point],
-    cum_lengths: Sequence[float],
-    s: float,
+        path: Sequence[Point],
+        cum_lengths: Sequence[float],
+        s: float,
 ) -> Tuple[int, float, Point]:
     if s <= 0.0:
         return 0, 0.0, path[0]
@@ -98,10 +98,10 @@ def _locate_point(
 
 
 def _insert_point(
-    points: List[Point],
-    seg_index: int,
-    alpha: float,
-    point: Point,
+        points: List[Point],
+        seg_index: int,
+        alpha: float,
+        point: Point,
 ) -> Tuple[List[Point], int, bool]:
     eps = 1e-6
     if alpha <= eps:
@@ -113,12 +113,12 @@ def _insert_point(
 
 
 def path_shortcutting(
-    path_xy: Sequence[Point],
-    env: environment_2d.Environment,
-    *,
-    maxrep: int = 300,
-    step: float = 0.015,
-    seed: Optional[int] = None,
+        path_xy: Sequence[Point],
+        env: environment_2d.Environment,
+        *,
+        maxrep: int = 300,
+        step: float = 0.015,
+        seed: Optional[int] = None,
 ) -> List[Point]:
     if path_xy is None:
         return []
@@ -159,7 +159,8 @@ def path_shortcutting(
     return path
 
 
-def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_idx: int) -> Tuple[Optional[List[int]], int]:
+def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_idx: int) -> Tuple[
+    Optional[List[int]], int]:
     """Shortest path using Dijkstra with a binary heap.
 
     Returns the path as a list of node indices and the number of nodes expanded.
@@ -198,10 +199,10 @@ def _dijkstra(adj: Sequence[Sequence[Tuple[int, float]]], start_idx: int, goal_i
 
 
 def _astar(
-    adj: Sequence[Sequence[Tuple[int, float]]],
-    coords: Sequence[Point],
-    start_idx: int,
-    goal_idx: int,
+        adj: Sequence[Sequence[Tuple[int, float]]],
+        coords: Sequence[Point],
+        start_idx: int,
+        goal_idx: int,
 ) -> Tuple[Optional[List[int]], int]:
     """A* search using the Euclidean distance as an admissible heuristic."""
 
@@ -210,7 +211,8 @@ def _astar(
     prev = [-1] * n
     dist[start_idx] = 0.0
     goal = coords[goal_idx]
-    pq: List[Tuple[float, int]] = [(euclid(coords[start_idx], goal), start_idx)]
+    pq: List[Tuple[float, int]] = [
+        (euclid(coords[start_idx], goal), start_idx)]
     expanded = 0
 
     while pq:
@@ -255,13 +257,13 @@ class ProbabilisticRoadmap2D:
     """Reusable PRM planner that separates roadmap construction from queries."""
 
     def __init__(
-        self,
-        n_samples: int = 600,
-        connection_radius: float = 0.6,
-        max_neighbors: Optional[int] = 15,
-        collision_check_step: float = 0.015,
-        max_sample_attempts: int = 20,
-        rng: Optional[random.Random] = None,
+            self,
+            n_samples: int = 800,
+            connection_radius: float = 0.6,
+            max_neighbors: Optional[int] = 15,
+            collision_check_step: float = 0.015,
+            max_sample_attempts: int = 20,
+            rng: Optional[random.Random] = None,
     ) -> None:
         if n_samples <= 0:
             raise ValueError("n_samples must be positive")
@@ -312,7 +314,8 @@ class ProbabilisticRoadmap2D:
             if env.check_collision(x, y):
                 failures += 1
                 if failures > max_failures:
-                    raise RuntimeError("Sampling stalled – increase workspace size or radius")
+                    raise RuntimeError(
+                        "Sampling stalled – increase workspace size or radius")
                 continue
             samples.append((x, y))
 
@@ -341,11 +344,11 @@ class ProbabilisticRoadmap2D:
         return PRMStats(build_time=build_time, search_time=0.0, total_samples=len(samples), total_nodes=len(samples))
 
     def query(
-        self,
-        start: Point,
-        goal: Point,
-        direct_connection: bool = True,
-        algorithm: str = "dijkstra",
+            self,
+            start: Point,
+            goal: Point,
+            direct_connection: bool = True,
+            algorithm: str = "dijkstra",
     ) -> Tuple[Optional[List[Point]], PRMStats]:
         """Plan from ``start`` to ``goal`` using the pre-built roadmap."""
         if self._env is None:
@@ -385,7 +388,8 @@ class ProbabilisticRoadmap2D:
             raise ValueError("Unsupported search algorithm: %s" % algorithm)
 
         if algo_name == "astar":
-            path_idx, expanded = _astar(base_adj, base_nodes, start_idx, goal_idx)
+            path_idx, expanded = _astar(
+                base_adj, base_nodes, start_idx, goal_idx)
         else:
             path_idx, expanded = _dijkstra(base_adj, start_idx, goal_idx)
 
@@ -422,7 +426,8 @@ class ProbabilisticRoadmap2D:
                 idxs = tree.query_ball_point(points[i], self.connection_radius)
                 filtered = [j for j in idxs if j != i]
                 if filtered and max_neighbors is not None:
-                    filtered = self._select_nearest(points, i, filtered, max_neighbors)
+                    filtered = self._select_nearest(
+                        points, i, filtered, max_neighbors)
                 neighbor_lists.append(filtered)
             return neighbor_lists
 
@@ -439,7 +444,8 @@ class ProbabilisticRoadmap2D:
         if max_neighbors is not None:
             for i in range(n):
                 if len(neighbor_lists[i]) > max_neighbors:
-                    neighbor_lists[i] = self._select_nearest(points, i, neighbor_lists[i], max_neighbors)
+                    neighbor_lists[i] = self._select_nearest(
+                        points, i, neighbor_lists[i], max_neighbors)
         return neighbor_lists
 
     def _select_nearest(self, points: np.ndarray, index: int, candidates: Iterable[int], k: int) -> List[int]:
@@ -459,16 +465,19 @@ class ProbabilisticRoadmap2D:
             return []
 
         if self._tree is not None:
-            idxs = [i for i in self._tree.query_ball_point(point, self.connection_radius) if i < len(self._nodes)]
+            idxs = [i for i in self._tree.query_ball_point(
+                point, self.connection_radius) if i < len(self._nodes)]
         else:
             diff = self._points - point
             d2 = np.einsum('ij,ij->i', diff, diff)
-            idxs = [int(i) for i in np.where(d2 <= self.connection_radius ** 2)[0]]
+            idxs = [int(i)
+                    for i in np.where(d2 <= self.connection_radius ** 2)[0]]
 
         if not idxs:
             return []
 
-        distances = [float(np.linalg.norm(self._points[idx] - point)) for idx in idxs]
+        distances = [float(np.linalg.norm(self._points[idx] - point))
+                     for idx in idxs]
         order = list(range(len(idxs)))
         order.sort(key=lambda k: distances[k])
         if self.max_neighbors is not None:
@@ -489,23 +498,23 @@ class ProbabilisticRoadmap2D:
 # ---------------------------------------------------------------------------
 
 def prm_plan(
-    env: environment_2d.Environment,
-    x_start: float,
-    y_start: float,
-    x_goal: float,
-    y_goal: float,
-    n_samples: int = 600,
-    radius: float = 0.6,
-    step: float = 0.015,
-    seed: Optional[int] = None,
-    verbose: bool = True,
-    max_neighbors: Optional[int] = 15,
-    direct_connection: bool = True,
-    visualize: bool = True,
-    apply_shortcut: bool = True,
-    shortcut_maxrep: int = 400,
-    shortcut_seed: Optional[int] = None,
-    search_algorithm: str = "dijkstra",
+        env: environment_2d.Environment,
+        x_start: float,
+        y_start: float,
+        x_goal: float,
+        y_goal: float,
+        n_samples: int = 800,
+        radius: float = 0.6,
+        step: float = 0.015,
+        seed: Optional[int] = None,
+        verbose: bool = True,
+        max_neighbors: Optional[int] = 15,
+        direct_connection: bool = True,
+        visualize: bool = True,
+        apply_shortcut: bool = True,
+        shortcut_maxrep: int = 400,
+        shortcut_seed: Optional[int] = None,
+        search_algorithm: str = "dijkstra",
 ):
     """Build a roadmap and attempt to solve a single query, preserving the
     interface of the original educational script."""
@@ -556,11 +565,13 @@ def prm_plan(
             if shortcut_path is not None and len(shortcut_path) >= 2:
                 short_len = path_length(shortcut_path)
                 gain_abs = raw_len - short_len
-                gain_rel = (gain_abs / raw_len) * 100.0 if raw_len > 1e-9 else float("nan")
+                gain_rel = (gain_abs / raw_len) * \
+                           100.0 if raw_len > 1e-9 else float("nan")
                 msgs.extend(
                     [
                         "  shortcut len : %.3f" % short_len,
-                        "  gain         : %.3f (%.2f%% shorter)" % (gain_abs, gain_rel),
+                        "  gain         : %.3f (%.2f%% shorter)" % (
+                            gain_abs, gain_rel),
                     ]
                 )
             print("\n".join(msgs))
@@ -577,7 +588,8 @@ def prm_plan(
             if shortcut_path is not None and len(shortcut_path) >= 2:
                 xs_s = [p[0] for p in shortcut_path]
                 ys_s = [p[1] for p in shortcut_path]
-                pl.plot(xs_s, ys_s, linestyle="--", linewidth=2, color="#720ab8", label="Shortcut")
+                pl.plot(xs_s, ys_s, linestyle="--", linewidth=2,
+                        color="#720ab8", label="Shortcut")
                 pl.legend(loc="best")
             pl.title("PRM path")
         pl.pause(0.001)
@@ -603,12 +615,12 @@ def _draw_roadmap(planner: ProbabilisticRoadmap2D) -> None:
 
 
 def run_single(
-    seed: int = 4,
-    n_samples: int = 600,
-    radius: float = 0.6,
-    algorithms: Sequence[str] = ("dijkstra", "astar"),
-    visualize_path: bool = True,
-    show_hist: bool = True,
+        seed: int = 4,
+        n_samples: int = 800,
+        radius: float = 0.6,
+        algorithms: Sequence[str] = ("dijkstra", "astar"),
+        visualize_path: bool = True,
+        show_hist: bool = True,
 ) -> Optional[dict]:
     print("\n=== Visualize single case ===")
     np.random.seed(seed)
@@ -652,7 +664,7 @@ def run_single(
     if visualize_path:
         # primary_algo = algorithms[0].lower()
         color_map = {
-            "dijkstra": "#4daf4a",
+            "dijkstra": "#e23c1b",
             "astar": "#377eb8",
         }
         shortcut_map = {
@@ -711,7 +723,8 @@ def run_single(
             stats = res["stats"]
             labels.append(key.upper())
             search_times.append(stats.search_time)
-            raw_len = stats.path_length if stats.path_length is not None else path_length(res["path"])
+            raw_len = stats.path_length if stats.path_length is not None else path_length(
+                res["path"])
             path_lengths.append(raw_len)
             shortcut = res.get("shortcut")
             if shortcut and len(shortcut) >= 2:
@@ -733,7 +746,8 @@ def run_single(
             width = 0.35
             x = np.arange(len(labels))
             ax1 = axes[1]
-            ax1.bar(x - width / 2, path_lengths, width=width, color="#377eb8", label="raw")
+            ax1.bar(x - width / 2, path_lengths, width=width,
+                    color="#377eb8", label="raw")
             ax1.bar(
                 x + width / 2,
                 [v if not math.isnan(v) else 0.0 for v in shortcut_lengths],
@@ -756,7 +770,8 @@ def run_single(
             fig.suptitle("Algorithm Comparison")
             fig.tight_layout()
 
-    print(f"Roadmap build time: {stats_build.build_time:.3f}s (nodes={stats_build.total_nodes})")
+    print(
+        f"Roadmap build time: {stats_build.build_time:.3f}s (nodes={stats_build.total_nodes})")
     for algo in algorithms:
         key = algo.lower()
         res = results.get(key)
@@ -764,11 +779,13 @@ def run_single(
             print(f"  {algo.upper()}: failed to find a path")
             continue
         stats = res["stats"]
-        raw_len = stats.path_length if stats.path_length is not None else path_length(res["path"])
+        raw_len = stats.path_length if stats.path_length is not None else path_length(
+            res["path"])
         short = res.get("shortcut")
         short_len = path_length(short) if short is not None else float("nan")
         gain = raw_len - short_len if short is not None else float("nan")
-        gain_pct = (gain / raw_len * 100.0) if short is not None and raw_len > 1e-9 else float("nan")
+        gain_pct = (
+                gain / raw_len * 100.0) if short is not None and raw_len > 1e-9 else float("nan")
         print(
             "  %s -> time: %.3fs | length: %.3f | shortcut: %s | gain: %s (%.2f%%) | expanded: %s"
             % (
@@ -786,13 +803,13 @@ def run_single(
 
 
 def benchmark(
-    num_env: int = 3,
-    num_queries: int = 5,
-    n_samples: int = 600,
-    radius: float = 0.6,
-    max_neighbors: Optional[int] = 15,
-    algorithms: Sequence[str] = ("dijkstra", "astar"),
-    show_hist: bool = True,
+        num_env: int = 3,
+        num_queries: int = 5,
+        n_samples: int = 800,
+        radius: float = 0.6,
+        max_neighbors: Optional[int] = 15,
+        algorithms: Sequence[str] = ("dijkstra", "astar"),
+        show_hist: bool = True,
 ) -> None:
     total_build = 0.0
     roadmap_nodes_total = 0
@@ -868,8 +885,10 @@ def benchmark(
     total_cases = num_env * num_queries
 
     print("\n=== PRM Benchmark (algorithm comparison) ===")
-    print(f"  Environments x Queries : {num_env} x {num_queries} (total {total_cases})")
-    print(f"  Avg roadmap build      : {total_build / max(1, num_env):.3f} s  | avg nodes: {roadmap_nodes_total / max(1, num_env):.1f}")
+    print(
+        f"  Environments x Queries : {num_env} x {num_queries} (total {total_cases})")
+    print(
+        f"  Avg roadmap build      : {total_build / max(1, num_env):.3f} s  | avg nodes: {roadmap_nodes_total / max(1, num_env):.1f}")
 
     labels: List[str] = []
     avg_times: List[float] = []
@@ -895,13 +914,16 @@ def benchmark(
             continue
 
         avg_time = float(np.mean(data["times"]))
-        avg_len = float(np.mean(data["lengths"])) if data["lengths"] else float('nan')
+        avg_len = float(np.mean(data["lengths"])
+                        ) if data["lengths"] else float('nan')
         sc_vals = [v for v in data["shortcut_lengths"] if not math.isnan(v)]
         avg_short_len = float(np.mean(sc_vals)) if sc_vals else float('nan')
-        avg_sc_time = float(np.mean(data["shortcut_times"])) if data["shortcut_times"] else 0.0
+        avg_sc_time = float(
+            np.mean(data["shortcut_times"])) if data["shortcut_times"] else 0.0
         avg_exp = float(np.mean(data["expanded"])) if data["expanded"] else 0.0
         gains_rel = [g for g in data["gains_rel"] if not math.isnan(g)]
-        avg_gain_pct = float(np.mean(gains_rel) * 100.0) if gains_rel else float('nan')
+        avg_gain_pct = float(np.mean(gains_rel) *
+                             100.0) if gains_rel else float('nan')
         best_gain = max(gains_rel) * 100.0 if gains_rel else float('nan')
         worst_gain = min(gains_rel) * 100.0 if gains_rel else float('nan')
 
@@ -946,7 +968,8 @@ def benchmark(
         axes[4].set_title("Avg Expanded Nodes")
         axes[4].set_ylabel("count")
 
-        axes[5].bar(labels, [rate * 100.0 for rate in success_rates], color=colors[: len(labels)])
+        axes[5].bar(labels, [rate * 100.0 for rate in success_rates],
+                    color=colors[: len(labels)])
         axes[5].set_title("Success Rate")
         axes[5].set_ylabel("percent")
 
@@ -955,7 +978,6 @@ def benchmark(
 
         fig.suptitle("Algorithm Benchmark Comparison")
         fig.tight_layout(rect=(0, 0, 1, 0.97))
-
 
 
 if __name__ == "__main__":
